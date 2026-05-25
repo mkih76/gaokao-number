@@ -27,6 +27,13 @@ def close_db(e=None):
     if db is not None:
         db.close()
 
+# ─── User Auth ─────────────────────────────────────────────
+def get_user_db():
+    if "user_db" not in g:
+        from src.user_db import UserDB
+        g.user_db = UserDB(app.config["DATABASE"])
+    return g.user_db
+
 # ─── Questions ────────────────────────────────────────────
 def load_questions():
     with open(app.config["QUESTIONS_FILE"], encoding="utf-8") as f:
@@ -205,10 +212,97 @@ def index():
 def static_files(filename):
     return send_from_directory("static", filename)
 
+# ── 邀请码 API ──
+@app.route("/api/invite/create", methods=["POST"])
+def api_invite_create():
+    """创建邀请码（管理员）"""
+    data = request.json or {}
+    user_db = get_user_db()
+    code = user_db.create_invite_code(
+        time_days=data.get("time_days", 30),
+        max_users=data.get("max_users", 1),
+        created_by=data.get("created_by", "admin"),
+    )
+    return jsonify({"code": code, "time_days": data.get("time_days", 30)})
+
+@app.route("/api/invite/verify", methods=["POST"])
+def api_invite_verify():
+    """验证邀请码"""
+    data = request.json or {}
+    code = data.get("code", "").strip().upper()
+    user_db = get_user_db()
+    result = user_db.verify_invite_code(code)
+    return jsonify(result)
+
+# ── 用户 API ──
+@app.route("/api/user/register", methods=["POST"])
+def api_user_register():
+    """用户注册"""
+    data = request.json or {}
+    user_id = data.get("user_id")
+    nickname = data.get("nickname", "同学")
+    invite_code = data.get("invite_code", "").strip().upper()
+
+    if not user_id:
+        return jsonify({"error": "user_id不能为空"}), 400
+
+    user_db = get_user_db()
+    try:
+        user = user_db.create_user(user_id, nickname, invite_code or None)
+        return jsonify({
+            "success": True,
+            "user_id": user["user_id"],
+            "nickname": user["nickname"],
+            "phase": user["phase"],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/user/login", methods=["POST"])
+def api_user_login():
+    """用户登录（简单验证）"""
+    data = request.json or {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id不能为空"}), 400
+
+    user_db = get_user_db()
+    user = user_db.get_user(user_id)
+    if not user:
+        return jsonify({"error": "用户不存在，请先注册"}), 404
+    return jsonify({
+        "success": True,
+        "user_id": user["user_id"],
+        "nickname": user["nickname"],
+        "phase": user["phase"],
+        "current_day": user["current_day"],
+        "plan": user["plan"],
+    })
+
+@app.route("/api/user/profile", methods=["GET"])
+def api_user_profile():
+    """获取用户资料"""
+    user_id = request.args.get("user_id", "anonymous")
+    user_db = get_user_db()
+    user = user_db.get_user(user_id)
+    if not user:
+        return jsonify({"error": "用户不存在"}), 404
+
+    return jsonify({
+        "user_id": user["user_id"],
+        "nickname": user["nickname"],
+        "plan": user["plan"],
+        "phase": user["phase"],
+        "current_day": user["current_day"],
+        "streak_days": user["streak_days"],
+        "total_score": user["total_score"],
+    })
+
 # ── 诊断 API ──
 @app.route("/api/diagnose/start", methods=["GET"])
 def api_diagnose_start():
     """开始诊断，返回15道诊断题"""
+    user_id = request.args.get("user_id", "anonymous")
     qdb = get_qdb()
     questions = list(qdb.values())
 
@@ -251,6 +345,15 @@ def api_diagnose_start():
         })
 
     session_id = str(uuid.uuid4())
+
+    # 创建 session 记录
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO web_sessions (session_id, user_id, current_day) VALUES (?, ?, 0)",
+        (session_id, user_id)
+    )
+    db.commit()
+
     return jsonify({"session_id": session_id, "questions": result})
 
 @app.route("/api/diagnose/submit", methods=["POST"])
@@ -258,6 +361,7 @@ def api_diagnose_submit():
     """提交诊断答案，返回诊断报告"""
     data = request.json
     session_id = data.get("session_id", "anon")
+    user_id = data.get("user_id", "anonymous")
     answers = data.get("answers", {})
 
     qdb = get_qdb()
@@ -266,14 +370,36 @@ def api_diagnose_submit():
     # 生成学习路径
     path = generate_path(diagnosis, diagnosis["recommended_plan"])
 
-    # 保存到数据库
+    # 保存到 web_sessions 表
     db = get_db()
     db.execute("""
-        INSERT INTO sessions (session_id, created_at, diagnosis, path_plan, current_day)
-        VALUES (?, ?, ?, ?, 0)
-    """, (session_id, datetime.now(), json.dumps(diagnosis, ensure_ascii=False),
-          json.dumps(path, ensure_ascii=False)))
+        INSERT OR REPLACE INTO web_sessions (session_id, user_id, created_at, diagnosis, path_plan, current_day)
+        VALUES (?, ?, ?, ?, ?, 0)
+    """, (session_id, user_id, datetime.now(),
+          json.dumps(diagnosis, ensure_ascii=False), json.dumps(path, ensure_ascii=False)))
     db.commit()
+
+    # 同时记录到 user_db 的 diagnoses 表（如果用户已注册）
+    try:
+        user_db = get_user_db()
+        user = user_db.get_user(user_id)
+        if user:
+            user_db.record_diagnosis(
+                user_id,
+                diagnosis["score"],
+                diagnosis["detail"],
+                diagnosis["weak_points"],
+                diagnosis.get("summary", "")
+            )
+            # 更新用户阶段为 learning
+            user_db.update_user(user_id,
+                phase="learning",
+                plan=diagnosis["recommended_plan"],
+                diagnosis=json.dumps(diagnosis, ensure_ascii=False),
+                path_plan=json.dumps(path, ensure_ascii=False)
+            )
+    except Exception:
+        pass  # 非注册用户跳过
 
     return jsonify({
         "diagnosis": diagnosis,
@@ -411,6 +537,37 @@ def api_mock_submit():
         "results": results,
     })
 
+# ── AI 问答 API ──
+@app.route("/api/ai/ask", methods=["POST"])
+def api_ai_ask():
+    """AI 智能问答（Hermes 代理）"""
+    data = request.json or {}
+    question = data.get("question", "").strip()
+    user_id = data.get("user_id", "anonymous")
+    mode = data.get("mode", "teach")  # teach / speed / debug
+
+    if not question:
+        return jsonify({"error": "问题不能为空"}), 400
+
+    try:
+        from src.hermes_client import get_hermes
+        hermes = get_hermes()
+        result = hermes.ask_math(question, user_id=user_id, mode=mode)
+        return jsonify({"success": True, "answer": result["answer"], "mode": mode})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/ai/health", methods=["GET"])
+def api_ai_health():
+    """检查 AI 服务状态"""
+    try:
+        from src.hermes_client import get_hermes
+        hermes = get_hermes()
+        ok = hermes.health_check()
+        return jsonify({"status": "ok" if ok else "error"})
+    except Exception:
+        return jsonify({"status": "error"})
+
 # ── 统计 API ──
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
@@ -430,18 +587,67 @@ def api_stats():
 
 # ─── Init DB ─────────────────────────────────────────────
 def init_db():
+    """初始化数据库表结构（兼容user_db.py）"""
     os.makedirs(os.path.dirname(app.config["DATABASE"]), exist_ok=True)
     db = sqlite3.connect(app.config["DATABASE"])
     db.executescript("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            session_id TEXT PRIMARY KEY,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            diagnosis TEXT,
-            path_plan TEXT,
-            current_day INTEGER DEFAULT 0,
-            streak_days INTEGER DEFAULT 0,
-            total_score REAL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS users (
+            user_id       TEXT PRIMARY KEY,
+            nickname      TEXT,
+            created_at    DATETIME DEFAULT (datetime('now','localtime')),
+            plan          TEXT DEFAULT '21days',
+            phase         TEXT DEFAULT 'diagnosis',
+            current_day   INT DEFAULT 0,
+            streak_days   INT DEFAULT 0,
+            total_score   REAL DEFAULT 0,
+            diagnosis     TEXT,
+            wrong_ids     TEXT DEFAULT '[]',
+            mock_log      TEXT DEFAULT '[]',
+            path_plan     TEXT DEFAULT '[]',
+            settings      TEXT DEFAULT '{}'
         );
+        CREATE TABLE IF NOT EXISTS diagnoses (
+            user_id       TEXT NOT NULL,
+            created_at    DATETIME DEFAULT (datetime('now','localtime')),
+            score         INT NOT NULL,
+            detail        TEXT NOT NULL,
+            weak_points   TEXT NOT NULL,
+            advice        TEXT,
+            PRIMARY KEY (user_id, created_at)
+        );
+        CREATE TABLE IF NOT EXISTS learning_logs (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       TEXT NOT NULL,
+            day           INT NOT NULL,
+            date          DATE NOT NULL,
+            topics        TEXT NOT NULL,
+            completed     INT DEFAULT 0,
+            score         INT,
+            wrong_ids     TEXT DEFAULT '[]',
+            note          TEXT,
+            UNIQUE(user_id, day)
+        );
+        CREATE TABLE IF NOT EXISTS web_sessions (
+            session_id    TEXT PRIMARY KEY,
+            user_id       TEXT,
+            created_at    DATETIME DEFAULT (datetime('now','localtime')),
+            diagnosis     TEXT,
+            path_plan     TEXT,
+            current_day   INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS invite_codes (
+            code          TEXT PRIMARY KEY,
+            time_days     INT DEFAULT 30,
+            max_users     INT DEFAULT 1,
+            used_count    INT DEFAULT 0,
+            created_at    DATETIME DEFAULT (datetime('now','localtime')),
+            created_by    TEXT,
+            expired_at    DATETIME
+        );
+        CREATE INDEX IF NOT EXISTS idx_diagnoses_user ON diagnoses(user_id);
+        CREATE INDEX IF NOT EXISTS idx_learning_user ON learning_logs(user_id);
+        CREATE INDEX IF NOT EXISTS idx_learning_date ON learning_logs(date);
+        CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(user_id);
     """)
     db.commit()
     db.close()

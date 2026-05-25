@@ -5,11 +5,17 @@
 import sqlite3
 import json
 import datetime
+import secrets
 from typing import Optional
 
 
 class UserNotFoundError(Exception):
     """用户不存在"""
+    pass
+
+
+class InviteCodeError(Exception):
+    """邀请码错误"""
     pass
 
 
@@ -63,6 +69,17 @@ class UserDB:
                 UNIQUE(user_id, day)
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS invite_codes (
+                code          TEXT PRIMARY KEY,
+                time_days     INT DEFAULT 30,
+                max_users     INT DEFAULT 1,
+                used_count    INT DEFAULT 0,
+                created_at    DATETIME DEFAULT (datetime('now','localtime')),
+                created_by    TEXT,
+                expired_at    DATETIME
+            )
+        """)
         self.conn.commit()
 
     def _json_load(self, s: str, default=None):
@@ -70,6 +87,81 @@ class UserDB:
             return json.loads(s)
         except (json.JSONDecodeError, TypeError):
             return default or {}
+
+    # ── 邀请码管理 ──────────────────────────────────────────
+
+    def create_invite_code(
+        self,
+        time_days: int = 30,
+        max_users: int = 1,
+        created_by: str = "system",
+    ) -> str:
+        """创建邀请码"""
+        code = secrets.token_urlsafe(8)[:12].upper()
+        expired_at = (
+            datetime.datetime.now() + datetime.timedelta(days=time_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        self.conn.execute(
+            """INSERT INTO invite_codes
+               (code, time_days, max_users, used_count, created_by, expired_at)
+               VALUES (?, ?, ?, 0, ?, ?)""",
+            (code, time_days, max_users, created_by, expired_at),
+        )
+        self.conn.commit()
+        return code
+
+    def verify_invite_code(self, code: str) -> dict:
+        """
+        验证邀请码是否可用
+
+        Returns:
+            {"valid": bool, "time_days": int, "reason": str}
+        """
+        row = self.conn.execute(
+            "SELECT * FROM invite_codes WHERE code = ?", (code,)
+        ).fetchone()
+
+        if not row:
+            return {"valid": False, "time_days": 0, "reason": "邀请码不存在"}
+
+        if row["used_count"] >= row["max_users"]:
+            return {"valid": False, "time_days": 0, "reason": "邀请码已用完"}
+
+        expired_at = datetime.datetime.strptime(row["expired_at"], "%Y-%m-%d %H:%M:%S")
+        if expired_at < datetime.datetime.now():
+            return {"valid": False, "time_days": 0, "reason": "邀请码已过期"}
+
+        return {
+            "valid": True,
+            "time_days": row["time_days"],
+            "max_users": row["max_users"],
+            "reason": "OK",
+        }
+
+    def use_invite_code(self, code: str) -> bool:
+        """使用邀请码（计数+1）"""
+        result = self.conn.execute(
+            "UPDATE invite_codes SET used_count = used_count + 1 WHERE code = ?",
+            (code,)
+        )
+        self.conn.commit()
+        return result.rowcount > 0
+
+    def list_invite_codes(self, created_by: str = None) -> list:
+        """列出邀请码"""
+        if created_by:
+            rows = self.conn.execute(
+                "SELECT * FROM invite_codes WHERE created_by = ? ORDER BY created_at DESC",
+                (created_by,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM invite_codes ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── 用户管理 ───────────────────────────────────────────
 
     def get_user(self, user_id: str) -> Optional[dict]:
         row = self.conn.execute(
@@ -79,7 +171,17 @@ class UserDB:
             return None
         return dict(row)
 
-    def create_user(self, user_id: str, nickname: str) -> dict:
+    def create_user(self, user_id: str, nickname: str, invite_code: str = None) -> dict:
+        """
+        创建用户（需验证邀请码）
+        """
+        # 验证邀请码
+        if invite_code:
+            verify = self.verify_invite_code(invite_code)
+            if not verify["valid"]:
+                raise InviteCodeError(verify["reason"])
+            self.use_invite_code(invite_code)
+
         self.conn.execute(
             "INSERT OR IGNORE INTO users (user_id, nickname) VALUES (?, ?)",
             (user_id, nickname)
