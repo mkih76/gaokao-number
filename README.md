@@ -12,12 +12,15 @@
 gaokao-number/
 ├── README.md                   # 本说明
 ├── AGENTS.md                   # AI开发者构建指引（给 Claude Code/Codex）
+├── Dockerfile                  # Docker镜像配置
+├── docker-compose.yml          # Docker Compose编排
+├── .env.example                # 环境变量示例
+├── init.sh                     # 一键部署脚本
 ├── docs/
 │   ├── product-plan.md         # 产品规划与变现方案
 │   ├── learning-path.md        # 系统性学习路径
 │   └── operation-plan.md       # 运营推广方案
 ├── questions/
-│   ├── 00-diagnosis.md         # 诊断测试（15题）
 │   ├── 01-hecha-beibi.md       # 和差倍比
 │   ├── 02-gongcheng.md         # 工程问题
 │   ├── 03-xingcheng.md         # 行程问题
@@ -36,14 +39,19 @@ gaokao-number/
 │   ├── question_db.py          # 题库引擎
 │   ├── diagnose.py             # 薄弱点诊断
 │   ├── path_planner.py         # 学习路径生成
+│   ├── cron_tasks.py           # 督学定时任务
+│   ├── exam_sim.py             # 模考系统
+│   ├── hermes_client.py        # Hermes AI网关客户端
 │   └── telegram_bot.py         # Telegram 交互
 ├── data/
-│   ├── questions.json           # 完整题库（结构化）
+│   ├── questions.json           # 完整题库（65道结构化真题）
 │   └── schema.sql               # 数据库结构
+├── static/
+│   └── index.html              # Web前端界面
 ├── tests/
 │   ├── test_diagnose.py
 │   └── test_path_planner.py
-└── init.sh                      # 一键部署
+└── web_server.py                # Web API服务
 ```
 
 ## 核心理念
@@ -64,8 +72,25 @@ gaokao-number/
 
 ## 快速开始
 
+### 方式一：Docker部署（推荐）
 ```bash
-git clone https://github.com/cmh2297/gaokao-number.git
+git clone https://github.com/mkih76/gaokao-number.git
+cd gaokao-number
+cp .env.example .env
+# 编辑 .env 填入 TELEGRAM_BOT_TOKEN
+docker-compose up -d
+```
+
+### 方式二：手动部署
+```bash
+git clone https://github.com/mkih76/gaokao-number.git
 cd gaokao-number
 bash init.sh
+# 编辑 .env 填入 TELEGRAM_BOT_TOKEN
+python web_server.py
+```
+
+### 方式三：仅Telegram Bot
+```bash
+python src/telegram_bot.py
 ```

@@ -1,0 +1,40 @@
+# ============================================
+# 公考数量关系 AI 学习系统 - Docker Compose
+# ============================================
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: gaokao-number-web
+    ports:
+      - "8080:8080"
+    environment:
+      - FLASK_ENV=production
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - HERMES_BASE_URL=${HERMES_BASE_URL:-http://23.94.206.159:8642}
+      - HERMES_API_KEY=${HERMES_API_KEY:-hermes2024}
+    volumes:
+      - ./data:/app/data
+      - ./static:/app/static
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Telegram Bot 服务（可选，独立部署）
+  bot:
+    build: .
+    container_name: gaokao-number-bot
+    command: python src/telegram_bot.py
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - HERMES_BASE_URL=${HERMES_BASE_URL:-http://23.94.206.159:8642}
+      - HERMES_API_KEY=${HERMES_API_KEY:-hermes2024}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - web
