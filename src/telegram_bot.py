@@ -238,17 +238,23 @@ class GaokaoBot:
         return generate_weekly_report(user, self.question_db)
 
     def handle_ask(self, user_id: str, question_text: str) -> str:
-        """AI答疑（占位，后续集成 Hermes Agent）"""
-        return f"""💬 **AI答疑**
+        """AI答疑（Hermes 代理）"""
+        try:
+            from src.hermes_client import get_hermes
+            hermes = get_hermes()
+            result = hermes.ask_math(question_text, user_id=user_id, mode="teach")
+            return f"💬 **AI导师解答**\n\n{result['answer']}"
+        except Exception as e:
+            logger.warning(f"Hermes AI error: {e}")
+            return f"""💬 **AI答疑**
 
 您的问题是：{question_text}
 
-（AI解析功能即将上线，当前暂用关键词匹配）
+（AI服务暂时不可用，请稍后再试）
 
-**相关题型**：暂无法识别
-**解析**：暂无
-
-请发送 /diagnose 先进行薄弱点诊断"""
+建议：
+• 发送 /diagnose 先进行薄弱点诊断
+• 发送 /wrong 查看已收录的错题"""
 
     def handle_settings(self, user_id: str) -> str:
         """设置"""
