@@ -442,10 +442,12 @@ def api_learn_today():
 def api_learn_submit():
     """提交练习答案"""
     data = request.json
+    user_id = data.get("user_id", "anonymous")
     answers = data.get("answers", {})
     qdb = get_qdb()
 
     results = []
+    wrong_ids = []
     for qid, user_ans in answers.items():
         q = qdb.get(qid)
         if not q:
@@ -461,11 +463,28 @@ def api_learn_submit():
             "type_name": _type_name(q["question_type"]),
             "method": q.get("method", ""),
         })
+        if not correct:
+            wrong_ids.append(qid)
 
     score = sum(1 for r in results if r["correct"])
+
+    # 记录错题到用户数据库
+    try:
+        user_db = get_user_db()
+        user = user_db.get_user(user_id)
+        if user:
+            for qid in wrong_ids:
+                user_db.add_wrong_question(user_id, qid)
+            # 更新总分
+            current = user.get("total_score", 0)
+            user_db.update_user(user_id, total_score=current + score)
+    except Exception:
+        pass
+
     return jsonify({
         "score": score,
         "total": len(results),
+        "wrong_count": len(wrong_ids),
         "results": results,
     })
 
@@ -498,10 +517,12 @@ def api_mock_start():
 def api_mock_submit():
     """提交模考答案"""
     data = request.json
+    user_id = data.get("user_id", "anonymous")
     answers = data.get("answers", {})
     qdb = get_qdb()
 
     results = []
+    wrong_ids = []
     for qid, user_ans in answers.items():
         q = qdb.get(qid)
         if not q:
@@ -515,7 +536,10 @@ def api_mock_submit():
             "solution": q["solution"],
             "stem": q["stem"],
             "type_name": _type_name(q["question_type"]),
+            "type": q["question_type"],
         })
+        if not correct:
+            wrong_ids.append(qid)
 
     score = sum(1 for r in results if r["correct"])
 
@@ -536,6 +560,67 @@ def api_mock_submit():
         "rating": rating,
         "results": results,
     })
+
+@app.route("/api/wrong/list", methods=["GET"])
+def api_wrong_list():
+    """获取用户的错题列表"""
+    user_id = request.args.get("user_id", "anonymous")
+    try:
+        user_db = get_user_db()
+        user = user_db.get_user(user_id)
+        if not user:
+            return jsonify({"error": "用户不存在"}), 404
+
+        wrong_ids = user_db.get_wrong_questions(user_id)
+        qdb = get_qdb()
+
+        wrong_questions = []
+        for qid in wrong_ids:
+            try:
+                q = qdb.get(qid)
+                wrong_questions.append({
+                    "qid": q["qid"],
+                    "type": q["question_type"],
+                    "type_name": _type_name(q["question_type"]),
+                    "difficulty": q["difficulty"],
+                    "source": q["source"],
+                    "stem": q["stem"],
+                    "options": q["options"],
+                    "answer": q["answer"],
+                    "solution": q["solution"],
+                    "method": q.get("method", ""),
+                })
+            except Exception:
+                continue
+
+        return jsonify({
+            "total": len(wrong_questions),
+            "wrong_questions": wrong_questions,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/wrong/remove", methods=["POST"])
+def api_wrong_remove():
+    """移除错题（已掌握）"""
+    data = request.json
+    user_id = data.get("user_id", "anonymous")
+    qid = data.get("qid", "")
+
+    try:
+        user_db = get_user_db()
+        user = user_db.get_user(user_id)
+        if not user:
+            return jsonify({"error": "用户不存在"}), 404
+
+        wrong_ids = user_db.get_wrong_questions(user_id)
+        if qid in wrong_ids:
+            wrong_ids.remove(qid)
+            user_db.update_user(user_id, wrong_ids=json.dumps(wrong_ids))
+
+        return jsonify({"success": True, "remaining": len(wrong_ids)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ── AI 问答 API ──
 @app.route("/api/ai/ask", methods=["POST"])
