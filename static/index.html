@@ -1290,14 +1290,66 @@ async function submitLearn() {
 // 错题本
 // ═══════════════════════════════════════════════════════════════
 async function loadWrongBook() {
-  // TODO: 从后端加载错题
-  $('wrong-list').innerHTML = `
-    <div style="text-align:center;padding:40px;color:var(--text-secondary);">
-      <div style="font-size:3em;margin-bottom:12px;">✨</div>
-      <p>暂无错题记录，做题后自动收录</p>
-      <button class="btn btn-primary" style="margin-top:16px;" onclick="switchTab('learn')">去做练习</button>
-    </div>
-  `;
+  if (!user.user_id) {
+    $('wrong-list').innerHTML = `
+      <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+        <div style="font-size:3em;margin-bottom:12px;">📒</div>
+        <p>登录后查看错题本</p>
+        <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="showLoginModal()">登录 / 注册</button>
+      </div>
+    `;
+    return;
+  }
+
+  try {
+    const data = await api(`/api/wrong/list?user_id=${user.user_id}`);
+    if (!data.wrong_questions || data.wrong_questions.length === 0) {
+      $('wrong-list').innerHTML = `
+        <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+          <div style="font-size:3em;margin-bottom:12px;">✨</div>
+          <p>暂无错题记录，做题后自动收录</p>
+          <button class="btn btn-primary btn-sm" style="margin-top:16px;" onclick="switchTab('learn')">去做练习</button>
+        </div>
+      `;
+      return;
+    }
+
+    $('wrong-list').innerHTML = data.wrong_questions.map(q => `
+      <div class="wrong-item">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span class="q-type-badge">${q.type_name}</span>
+          <span style="color:#F5A623;font-size:0.82em;">${'⭐'.repeat(q.difficulty)}</span>
+        </div>
+        <div class="q-stem" style="font-size:0.95em;margin-bottom:10px;">${q.stem}</div>
+        <div class="q-answer">
+          <span class="your-ans">❌ 你的答案：--</span>
+          <span class="right-ans">✅ 正确答案：${q.answer}</span>
+        </div>
+        <div class="solution-box">
+          <strong>💡 解析：</strong>${q.solution}<br>
+          <span style="color:#888;font-size:0.85em;">方法：${q.method}</span>
+        </div>
+        <div style="margin-top:10px;text-align:right;">
+          <button class="btn btn-sm btn-outline" onclick="removeWrong('${q.qid}')">已掌握</button>
+        </div>
+      </div>
+    `).join('');
+  } catch(e) {
+    $('wrong-list').innerHTML = `<div style="color:var(--danger);text-align:center;padding:20px;">加载失败：${e.message}</div>`;
+  }
+}
+
+async function removeWrong(qid) {
+  if (!user.user_id) return;
+  try {
+    await api('/api/wrong/remove', {
+      method: 'POST',
+      body: { user_id: user.user_id, qid }
+    });
+    loadWrongBook();
+  } catch(e) {
+    alert('移除失败：' + e.message);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
