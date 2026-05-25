@@ -488,6 +488,181 @@ def api_learn_submit():
         "results": results,
     })
 
+# ── 学习进度 API ──
+@app.route("/api/learn/day_content", methods=["GET"])
+def api_learn_day_content():
+    """获取某天的学习内容（题目）"""
+    user_id = request.args.get("user_id", "anonymous")
+    day = int(request.args.get("day", 1))
+
+    try:
+        user_db = get_user_db()
+        user = user_db.get_user(user_id)
+        if not user:
+            return jsonify({"error": "用户不存在"}), 404
+
+        path_plan = user.get("path_plan", "[]")
+        try:
+            path = json.loads(path_plan) if isinstance(path_plan, str) else path_plan
+        except Exception:
+            path = []
+        day_plan = next((d for d in path if d.get("day") == day), None)
+        if not day_plan:
+            return jsonify({"error": f"第{day}天不存在"}), 404
+
+        # 根据 day_plan 的类型选择题目
+        qdb = get_qdb()
+        questions = list(qdb.values())
+        types = day_plan.get("types", [])
+        difficulty = day_plan.get("difficulty", 2)
+
+        selected = []
+        if types:
+            for qt in types:
+                pool = [q for q in questions if q["question_type"] == qt and q.get("difficulty", 3) <= difficulty + 1]
+                import random
+                random.shuffle(pool)
+                selected.extend(pool[:2])
+
+        if not selected:
+            import random
+            selected = random.sample(questions, min(3, len(questions)))
+
+        selected = selected[:3]
+
+        result = []
+        for q in selected:
+            result.append({
+                "qid": q["qid"],
+                "type": q["question_type"],
+                "type_name": _type_name(q["question_type"]),
+                "difficulty": q["difficulty"],
+                "source": q["source"],
+                "stem": q["stem"],
+                "options": q["options"],
+            })
+
+        return jsonify({
+            "day": day,
+            "plan": day_plan,
+            "questions": result,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/learn/progress", methods=["GET"])
+def api_learn_progress():
+    """获取用户学习进度"""
+    user_id = request.args.get("user_id", "anonymous")
+    try:
+        user_db = get_user_db()
+        user = user_db.get_user(user_id)
+        if not user:
+            return jsonify({"error": "用户不存在"}), 404
+
+        path_plan = user.get("path_plan", "[]")
+        try:
+            path = json.loads(path_plan) if isinstance(path_plan, str) else path_plan
+        except Exception:
+            path = []
+
+        current_day = user.get("current_day", 0)
+        streak_days = user.get("streak_days", 0)
+
+        return jsonify({
+            "current_day": current_day,
+            "total_days": len(path),
+            "streak_days": streak_days,
+            "plan": user.get("plan", "21days"),
+            "phase": user.get("phase", "diagnosis"),
+            "total_score": user.get("total_score", 0),
+            "path": path,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/learn/complete_day", methods=["POST"])
+def api_learn_complete_day():
+    """完成今日学习（推进到下一天）"""
+    data = request.json
+    user_id = data.get("user_id", "anonymous")
+    day = int(data.get("day", 1))
+    score = int(data.get("score", 0))
+    wrong_ids = data.get("wrong_ids", [])
+
+    try:
+        user_db = get_user_db()
+        user = user_db.get_user(user_id)
+        if not user:
+            return jsonify({"error": "用户不存在"}), 404
+
+        current_day = user.get("current_day", 0)
+
+        # 只能完成当前天或之前的天
+        if day != current_day + 1:
+            return jsonify({"error": f"请先完成第{current_day + 1}天"}), 400
+
+        # 记录学习日志
+        path_plan = user.get("path_plan", "[]")
+        try:
+            path = json.loads(path_plan) if isinstance(path_plan, str) else path_plan
+        except Exception:
+            path = []
+        day_plan = next((d for d in path if d.get("day") == day), {})
+        topics_str = "、".join(day_plan.get("topics", []))
+
+        user_db.record_learning_log(
+            user_id=user_id,
+            day=day,
+            topics=topics_str,
+            completed=1,
+            score=score,
+            wrong_ids=wrong_ids,
+        )
+
+        # 更新连续天数
+        last_log = user_db.get_learning_logs(user_id, 1)
+        streak = user.get("streak_days", 0)
+        if last_log:
+            from datetime import date, timedelta
+            last_date = last_log[0].get("date", "")
+            if last_date:
+                try:
+                    last_date_obj = date.fromisoformat(last_date)
+                    today = date.today()
+                    if last_date_obj == today - timedelta(days=1):
+                        streak += 1
+                    elif last_date_obj == today:
+                        pass  # 今天已打卡
+                    else:
+                        streak = 1
+                except Exception:
+                    streak = 1
+        else:
+            streak = 1
+
+        # 推进到下一天
+        user_db.update_user(
+            user_id,
+            current_day=day,
+            streak_days=streak,
+            phase="learning" if day >= len(path) else "learning",
+        )
+
+        # 添加今日错题
+        for qid in wrong_ids:
+            user_db.add_wrong_question(user_id, qid)
+
+        return jsonify({
+            "success": True,
+            "current_day": day,
+            "streak_days": streak,
+            "next_day": day + 1 if day < len(path) else None,
+            "completed": day >= len(path),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ── 模考 API ──
 @app.route("/api/mock/start", methods=["GET"])
 def api_mock_start():
